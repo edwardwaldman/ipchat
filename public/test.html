@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ipchat test</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #777; font: 13px monospace; }
+  body { display: flex; flex-direction: column; }
+  p { margin: 8px 12px; }
+  main { flex: 1; display: flex; gap: 2px; background: #333; }
+  iframe { flex: 1; border: 0; background: #000; }
+  @media (max-width: 700px) { main { flex-direction: column; } }
+</style>
+</head>
+<body>
+<p>ipchat test: left is 1.1.1.1, right is 1.2.3.4. Type 1.2.3.4 on the left and 1.1.1.1 on the right. Reload a side to test "disconnected".</p>
+<main>
+  <iframe src="/?as=1.1.1.1"></iframe>
+  <iframe src="/?as=1.2.3.4"></iframe>
+</main>
+</body>
+</html>

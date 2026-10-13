@@ -43,13 +43,18 @@
   }
 
   async function hash(s) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ipchat:' + s));
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ipchat:' + TEST + s));
     return 'ipchat-' + [...new Uint8Array(buf)].slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
+  // Test mode: ?as=1.1.1.1 pretends to be that ip. Test users can only match other test users.
+  const fakeIp = new URLSearchParams(location.search).get('as');
+  const TEST = fakeIp ? 'test:' : '';
+
   input.disabled = true;
-  fetch('/api/ip', { cache: 'no-store' }).then(r => r.json()).then(d => {
+  (fakeIp ? Promise.resolve({ ip: fakeIp.slice(0, 64) }) : fetch('/api/ip', { cache: 'no-store' }).then(r => r.json())).then(d => {
     me = d.ip;
+    if (TEST) line('[test mode]', true);
     line('your ip: ' + me, true);
     line('type the ip you want to connect to', true);
     input.disabled = false;
