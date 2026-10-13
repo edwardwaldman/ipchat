@@ -23,7 +23,7 @@
   <span id="prompt">ip&gt;</span>
   <input id="input" autofocus>
 </form>
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="/peerjs.min.js"></script>
 <script>
   // Messages go directly browser-to-browser (WebRTC). The PeerJS server only
   // helps the two browsers find each other; it never sees the chat.
@@ -31,6 +31,7 @@
   const form = document.getElementById('form');
   const input = document.getElementById('input');
   const prompt = document.getElementById('prompt');
+  window.onerror = (m) => line('error: ' + m, true);
   let state = 'ip'; // ip -> waiting -> chat -> done
   let me = null, target = null, peer = null, conn = null, connInit = null;
 
@@ -96,6 +97,7 @@
   }
 
   async function start() {
+    if (typeof Peer === 'undefined') return end('error: chat library failed to load, reload the page');
     let mine, theirs;
     if (me === target) { const h = await hash(me + '>' + me); mine = h + 'a'; theirs = h + 'b'; }
     else { mine = await hash(me + '>' + target); theirs = await hash(target + '>' + me); }
