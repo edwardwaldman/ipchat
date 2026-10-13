@@ -23,12 +23,16 @@
   <span id="prompt">ip&gt;</span>
   <input id="input" autofocus>
 </form>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
+  // Messages go directly browser-to-browser (WebRTC). The PeerJS server only
+  // helps the two browsers find each other; it never sees the chat.
   const log = document.getElementById('log');
   const form = document.getElementById('form');
   const input = document.getElementById('input');
   const prompt = document.getElementById('prompt');
   let state = 'ip'; // ip -> waiting -> chat -> done
+  let me = null, target = null, peer = null, conn = null, connInit = null;
 
   function line(text, sys) {
     const div = document.createElement('div');
@@ -38,51 +42,110 @@
     log.scrollTop = log.scrollHeight;
   }
 
-  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  async function hash(s) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ipchat:' + s));
+    return 'ipchat-' + [...new Uint8Array(buf)].slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
 
-  ws.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    if (m.type === 'you') {
-      line('your ip: ' + m.ip, true);
-      line('type the ip you want to connect to', true);
-    } else if (m.type === 'waiting') {
-      line('waiting for ' + m.target + ' to enter your ip...', true);
-    } else if (m.type === 'start') {
-      state = 'chat';
-      log.textContent = '';
-      line('connected to ' + m.peer, true);
-      prompt.textContent = m.me + '>';
-      input.disabled = false;
-      input.focus();
-    } else if (m.type === 'msg') {
-      line(m.from + ': ' + m.text);
-    } else if (m.type === 'left') {
-      line(m.ip + ' disconnected', true);
-      end();
-    }
-  };
+  input.disabled = true;
+  fetch('/api/ip', { cache: 'no-store' }).then(r => r.json()).then(d => {
+    me = d.ip;
+    line('your ip: ' + me, true);
+    line('type the ip you want to connect to', true);
+    input.disabled = false;
+    input.focus();
+  }).catch(() => line('could not get your ip, reload the page', true));
 
-  ws.onclose = () => {
-    if (state !== 'done') { line('connection lost', true); end(); }
-  };
-
-  function end() {
+  function end(msg) {
+    if (state === 'done') return;
+    if (msg) line(msg, true);
     state = 'done';
     input.disabled = true;
     prompt.textContent = '>';
+    if (peer) peer.destroy();
   }
+
+  // Both sides may dial at once; keep the connection started by the smaller id so both agree.
+  function adopt(c, initiator) {
+    if (state === 'done') return c.close();
+    if (conn && conn !== c) {
+      if (initiator < connInit) { const old = conn; conn = c; connInit = initiator; old.close(); }
+      else return c.close();
+    } else { conn = c; connInit = initiator; }
+
+    c.on('data', d => {
+      if (c !== conn || typeof d !== 'object' || !d) return;
+      if (d.t === 'msg' && typeof d.text === 'string') line(target + ': ' + d.text.slice(0, 2000));
+      else if (d.t === 'bye') end(target + ' disconnected');
+    });
+    c.on('close', () => { if (c === conn) end(target + ' disconnected'); });
+
+    if (state !== 'chat') {
+      state = 'chat';
+      log.textContent = '';
+      line('connected to ' + target, true);
+      prompt.textContent = me + '>';
+      input.disabled = false;
+      input.focus();
+    }
+  }
+
+  async function start() {
+    let mine, theirs;
+    if (me === target) { const h = await hash(me + '>' + me); mine = h + 'a'; theirs = h + 'b'; }
+    else { mine = await hash(me + '>' + target); theirs = await hash(target + '>' + me); }
+
+    peer = new Peer(mine);
+    peer.on('open', id => {
+      line('waiting for ' + target + ' to enter your ip...', true);
+      const c = peer.connect(theirs, { reliable: true });
+      c.on('open', () => adopt(c, id));
+    });
+    peer.on('connection', c => c.on('open', () => adopt(c, c.peer)));
+    peer.on('error', err => {
+      if (err.type === 'peer-unavailable') return; // they're not here yet, keep waiting
+      if (err.type === 'unavailable-id' && me === target && !mine.endsWith('b')) {
+        peer.destroy(); [mine, theirs] = [theirs, mine];
+        peer = null; return restart(mine, theirs);
+      }
+      if (err.type === 'unavailable-id') return end('someone on your ip is already waiting for ' + target);
+      if (state !== 'chat') end('error: ' + err.type);
+    });
+  }
+
+  // Same-ip case: the "a" slot was taken, so take "b" and dial "a".
+  function restart(mine, theirs) {
+    peer = new Peer(mine);
+    peer.on('open', id => {
+      const c = peer.connect(theirs, { reliable: true });
+      c.on('open', () => adopt(c, id));
+    });
+    peer.on('connection', c => c.on('open', () => adopt(c, c.peer)));
+    peer.on('error', err => {
+      if (err.type === 'peer-unavailable') return;
+      if (err.type === 'unavailable-id') return end('someone on your ip is already waiting for ' + target);
+      if (state !== 'chat') end('error: ' + err.type);
+    });
+  }
+
+  window.addEventListener('pagehide', () => {
+    if (conn && conn.open) try { conn.send({ t: 'bye' }); } catch {}
+  });
 
   form.onsubmit = (e) => {
     e.preventDefault();
     const v = input.value;
-    if (!v.trim() || ws.readyState !== WebSocket.OPEN) return;
+    if (!v.trim()) return;
     input.value = '';
-    if (state === 'ip') {
+    if (state === 'ip' && me) {
       state = 'waiting';
+      target = v.trim().slice(0, 64);
       input.disabled = true;
-      ws.send(JSON.stringify({ type: 'connect', target: v.trim() }));
-    } else if (state === 'chat') {
-      ws.send(JSON.stringify({ type: 'msg', text: v }));
+      start();
+    } else if (state === 'chat' && conn && conn.open) {
+      const text = v.slice(0, 2000);
+      conn.send({ t: 'msg', text });
+      line(me + ': ' + text);
     }
   };
 </script>
