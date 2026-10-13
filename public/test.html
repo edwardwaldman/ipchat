@@ -9,15 +9,33 @@
   body { display: flex; flex-direction: column; }
   p { margin: 8px 12px; }
   main { flex: 1; display: flex; gap: 2px; background: #333; }
+  section { flex: 1; display: flex; flex-direction: column; background: #000; }
+  .bar { display: flex; gap: 8px; padding: 6px 12px; border-bottom: 1px solid #333; }
+  button { background: #000; color: #ddd; border: 1px solid #444; font: inherit; padding: 2px 8px; cursor: pointer; }
+  button:hover { border-color: #888; }
   iframe { flex: 1; border: 0; background: #000; }
   @media (max-width: 700px) { main { flex-direction: column; } }
 </style>
 </head>
 <body>
-<p>ipchat test: left is 1.1.1.1, right is 1.2.3.4. Type 1.2.3.4 on the left and 1.1.1.1 on the right. Click a side to type in it. Reload a side to test "disconnected".</p>
+<p>ipchat test: type 1.2.3.4 on the left and 1.1.1.1 on the right. Click a side to type in it.</p>
 <main>
-  <iframe id="a" src="/?as=1.1.1.1" onload="this.contentWindow.focus()"></iframe>
-  <iframe src="/?as=1.2.3.4"></iframe>
+  <section>
+    <div class="bar">1.1.1.1 <button data-side="a" data-act="close">disconnect</button><button data-side="a" data-act="open">reopen</button></div>
+    <iframe id="a" src="/?as=1.1.1.1" onload="this.contentWindow.focus()"></iframe>
+  </section>
+  <section>
+    <div class="bar">1.2.3.4 <button data-side="b" data-act="close">disconnect</button><button data-side="b" data-act="open">reopen</button></div>
+    <iframe id="b" src="/?as=1.2.3.4"></iframe>
+  </section>
 </main>
+<script>
+  const urls = { a: '/?as=1.1.1.1', b: '/?as=1.2.3.4' };
+  document.querySelectorAll('button').forEach(btn => btn.onclick = () => {
+    const f = document.getElementById(btn.dataset.side);
+    // "disconnect" acts like closing the tab; "reopen" is a fresh tab
+    f.src = btn.dataset.act === 'close' ? 'about:blank' : urls[btn.dataset.side];
+  });
+</script>
 </body>
 </html>
