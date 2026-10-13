@@ -154,35 +154,29 @@
     if (me === target) { const h = await hash(me + '>' + me); mine = h + 'a'; theirs = h + 'b'; }
     else { mine = await hash(me + '>' + target); theirs = await hash(target + '>' + me); }
 
+    line('waiting for ' + target + ' to enter your ip...', true);
+    join(mine, theirs, 0);
+  }
+
+  // Register as `mine` and dial `theirs`. If our id is still held by an old tab
+  // (it takes the server a while to notice it closed), keep retrying.
+  function join(mine, theirs, tries) {
+    if (state === 'done') return;
     peer = new Peer(mine, window.PEER_OPTS);
     peer.on('open', id => {
-      line('waiting for ' + target + ' to enter your ip...', true);
       const c = peer.connect(theirs, { reliable: true });
       c.on('open', () => adopt(c, id));
     });
     peer.on('connection', c => c.on('open', () => adopt(c, c.peer)));
     peer.on('error', err => {
       if (err.type === 'peer-unavailable') return; // they're not here yet, keep waiting
-      if (err.type === 'unavailable-id' && me === target && !mine.endsWith('b')) {
-        peer.destroy(); [mine, theirs] = [theirs, mine];
-        peer = null; return restart(mine, theirs);
+      if (err.type === 'unavailable-id') {
+        peer.destroy();
+        // same ip on both sides: the other slot may be free
+        if (me === target && tries % 2 === 0) return join(theirs, mine, tries + 1);
+        if (tries > 60) return end('someone on your ip is already waiting for ' + target);
+        return setTimeout(() => join(mine, theirs, tries + 1), 2000);
       }
-      if (err.type === 'unavailable-id') return end('someone on your ip is already waiting for ' + target);
-      if (state !== 'chat') end('error: ' + err.type);
-    });
-  }
-
-  // Same-ip case: the "a" slot was taken, so take "b" and dial "a".
-  function restart(mine, theirs) {
-    peer = new Peer(mine, window.PEER_OPTS);
-    peer.on('open', id => {
-      const c = peer.connect(theirs, { reliable: true });
-      c.on('open', () => adopt(c, id));
-    });
-    peer.on('connection', c => c.on('open', () => adopt(c, c.peer)));
-    peer.on('error', err => {
-      if (err.type === 'peer-unavailable') return;
-      if (err.type === 'unavailable-id') return end('someone on your ip is already waiting for ' + target);
       if (state !== 'chat') end('error: ' + err.type);
     });
   }
@@ -220,7 +214,7 @@
   });
 
   function sayBye() { if (conn && conn.open) try { conn.send({ t: 'bye' }); } catch {} }
-  window.addEventListener('pagehide', sayBye);
+  window.addEventListener('pagehide', () => { sayBye(); if (peer) peer.destroy(); });
 
   // Clicking "ipchat" or your ip leaves the chat and goes back to the start.
   function goHome(e) {
