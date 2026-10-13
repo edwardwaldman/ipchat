@@ -11,6 +11,8 @@
   #log { white-space: pre-wrap; word-break: break-word; }
   #log .sys { color: #777; }
   #log .bad { color: #f44; }
+  #reqs { color: #e5c07b; }
+  #reqs:empty { display: none; }
   #home { color: inherit; text-decoration: none; }
   #prompt.home { cursor: pointer; }
   #prompt.home:hover, #home:hover { text-decoration: underline; }
@@ -31,6 +33,7 @@
 <body>
 <h1><a id="home" href="">ipchat</a><span id="ping"></span></h1>
 <div id="log"></div>
+<div id="reqs"></div>
 <div id="line"><span id="plus" title="send a file">[+]</span><span id="prompt">ip&gt; </span><span id="typed"></span><span id="cursor"></span></div>
 <form id="form" autocomplete="off"><input id="file" type="file" hidden><input id="input" autofocus autocapitalize="off" autocorrect="off" spellcheck="false"></form>
 <script src="/peerjs.min.js"></script>
@@ -93,12 +96,71 @@
     if (TEST) line('[test mode]', true);
     line('your ip: ' + me, true);
     line('type the ip you want to connect to', true);
+    listen();
   }).catch(() => line('could not get your ip, reload the page', 'bad'));
 
   const pingEl = document.getElementById('ping');
   let pingTimer = null, unanswered = 0; // when our oldest unanswered ping went out
 
+  // Inbox: while you're not chatting, anyone who types your ip pings this so you
+  // can see how many are requesting you. Their ip is never shown or sent.
+  const reqsEl = document.getElementById('reqs');
+  let inbox = null, outbox = null, outboxTimer = null;
+  const requesters = new Map(); // conn -> last time heard
+
+  function showReqs() {
+    const now = Date.now();
+    for (const [c, t] of requesters) if (now - t > 8000 || !c.open) requesters.delete(c);
+    const n = requesters.size;
+    reqsEl.textContent = n && state !== 'chat' && state !== 'done' ? 'an ip is requesting you (' + n + ' active)' : '';
+  }
+  setInterval(showReqs, 2000);
+
+  async function listen(tries = 0) {
+    if (typeof Peer === 'undefined' || state === 'chat' || state === 'done') return;
+    inbox = new Peer(await hash('inbox>' + me), window.PEER_OPTS);
+    inbox.on('connection', c => {
+      c.on('data', d => { if (d && d.t === 'req') { requesters.set(c, Date.now()); showReqs(); } });
+      c.on('close', () => { requesters.delete(c); showReqs(); });
+    });
+    // another tab on this ip holds the inbox (or an old one is still closing): retry
+    inbox.on('error', err => {
+      if (err.type === 'unavailable-id' && tries < 60) { inbox.destroy(); inbox = null; setTimeout(() => listen(tries + 1), 3000); }
+    });
+  }
+
+  function stopListening() {
+    if (inbox) inbox.destroy();
+    inbox = null;
+    requesters.clear();
+    showReqs();
+  }
+
+  // While waiting, keep pinging the target's inbox so they see the request.
+  async function request() {
+    const box = await hash('inbox>' + target);
+    const tick = () => {
+      if (state !== 'waiting' || !peer || peer.destroyed) return stopRequesting();
+      if (peer.open && (!outbox || !outbox.open)) {
+        if (outbox) outbox.close();
+        const c = outbox = peer.connect(box, { reliable: true });
+        c.on('open', () => { if (state === 'waiting') c.send({ t: 'req' }); });
+      }
+      if (outbox && outbox.open) outbox.send({ t: 'req' });
+    };
+    outboxTimer = setInterval(tick, 3000);
+    if (peer.open) tick(); else peer.on('open', tick);
+  }
+
+  function stopRequesting() {
+    clearInterval(outboxTimer);
+    if (outbox) outbox.close();
+    outbox = null;
+  }
+
   function end(msg) {
+    stopListening();
+    stopRequesting();
     if (state === 'done') return;
     if (msg) line(msg, 'bad');
     clearInterval(pingTimer);
@@ -136,6 +198,8 @@
 
     if (state !== 'chat') {
       state = 'chat';
+      stopListening();
+      stopRequesting();
       log.textContent = '';
       line('connected to ' + target, true);
       prompt.textContent = me + ': ';
@@ -163,6 +227,7 @@
 
     line('waiting for ' + target + ' to enter your ip...', true);
     join(mine, theirs, 0);
+    request();
   }
 
   // Register as `mine` and dial `theirs`. If our id is still held by an old tab
@@ -221,14 +286,14 @@
   });
 
   function sayBye() { if (conn && conn.open) try { conn.send({ t: 'bye' }); } catch {} }
-  window.addEventListener('pagehide', () => { sayBye(); if (peer) peer.destroy(); });
+  window.addEventListener('pagehide', () => { sayBye(); if (peer) peer.destroy(); stopListening(); });
 
   // Clicking "ipchat" or your ip leaves the chat and goes back to the start.
   function goHome(e) {
     e.preventDefault();
     e.stopPropagation();
     sayBye();
-    setTimeout(() => { if (peer) peer.destroy(); location.reload(); }, 100);
+    setTimeout(() => { if (peer) peer.destroy(); stopListening(); location.reload(); }, 100);
   }
   document.getElementById('home').addEventListener('click', goHome);
   prompt.addEventListener('click', (e) => { if (state === 'chat') goHome(e); });
