@@ -14,9 +14,9 @@
 </style>
 </head>
 <body>
-<p>ipchat test: left is 1.1.1.1, right is 1.2.3.4. Type 1.2.3.4 on the left and 1.1.1.1 on the right. Reload a side to test "disconnected".</p>
+<p>ipchat test: left is 1.1.1.1, right is 1.2.3.4. Type 1.2.3.4 on the left and 1.1.1.1 on the right. Click a side to type in it. Reload a side to test "disconnected".</p>
 <main>
-  <iframe src="/?as=1.1.1.1"></iframe>
+  <iframe id="a" src="/?as=1.1.1.1" onload="this.contentWindow.focus()"></iframe>
   <iframe src="/?as=1.2.3.4"></iframe>
 </main>
 </body>

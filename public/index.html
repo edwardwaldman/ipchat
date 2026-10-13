@@ -6,23 +6,24 @@
 <title>ipchat</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 15px monospace; }
-  body { display: flex; flex-direction: column; padding: 12px; box-sizing: border-box; }
+  body { padding: 12px; box-sizing: border-box; overflow-y: auto; }
   h1 { margin: 0 0 10px; font: bold 15px monospace; color: #fff; }
-  #log { flex: 1; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  #log { white-space: pre-wrap; word-break: break-word; }
   #log .sys { color: #777; }
-  form { display: flex; gap: 6px; margin-top: 8px; }
+  #line { white-space: pre-wrap; word-break: break-word; cursor: text; }
+  #line.locked { display: none; }
   #prompt { color: #777; }
-  input { flex: 1; background: #000; color: #ddd; border: 0; border-bottom: 1px solid #444; font: inherit; outline: none; }
-  input:disabled { opacity: .4; }
+  #cursor { display: inline-block; width: 2px; height: 1.1em; margin-left: 1px; vertical-align: text-bottom; background: #ddd; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  /* real input is invisible; it just receives keystrokes (and opens the phone keyboard) */
+  #input { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; }
 </style>
 </head>
 <body>
 <h1>ipchat</h1>
 <div id="log"></div>
-<form id="form" autocomplete="off">
-  <span id="prompt">ip&gt;</span>
-  <input id="input" autofocus>
-</form>
+<div id="line"><span id="prompt">ip&gt; </span><span id="typed"></span><span id="cursor"></span></div>
+<form id="form" autocomplete="off"><input id="input" autofocus autocapitalize="off" autocorrect="off" spellcheck="false"></form>
 <script src="/peerjs.min.js"></script>
 <script>
   // Messages go directly browser-to-browser (WebRTC). The PeerJS server only
@@ -31,6 +32,30 @@
   const form = document.getElementById('form');
   const input = document.getElementById('input');
   const prompt = document.getElementById('prompt');
+  const typed = document.getElementById('typed');
+  const lineEl = document.getElementById('line');
+
+  // Typing goes straight to the prompt line: no clicking needed.
+  const sync = () => { typed.textContent = input.value; document.body.scrollTop = document.body.scrollHeight; };
+  input.addEventListener('input', sync);
+  const grab = () => { if (document.activeElement !== input) input.focus({ preventScroll: true }); };
+  document.addEventListener('click', grab);
+  document.addEventListener('keydown', (e) => {
+    if (document.activeElement === input || e.ctrlKey || e.metaKey || e.altKey) return;
+    grab();
+    if (e.key.length === 1) { input.value += e.key; sync(); e.preventDefault(); }
+    else if (e.key === 'Backspace') { input.value = input.value.slice(0, -1); sync(); e.preventDefault(); }
+    else if (e.key === 'Enter') { form.requestSubmit(); e.preventDefault(); }
+  });
+  window.addEventListener('focus', grab);
+  setLocked(false);
+  grab();
+
+  function setLocked(on) {
+    input.disabled = on;
+    lineEl.classList.toggle('locked', on);
+    if (!on) setTimeout(grab, 0);
+  }
   window.onerror = (m) => line('error: ' + m, true);
   let state = 'ip'; // ip -> waiting -> chat -> done
   let me = null, target = null, peer = null, conn = null, connInit = null;
@@ -40,7 +65,7 @@
     if (sys) div.className = 'sys';
     div.textContent = text;
     log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
+    document.body.scrollTop = document.body.scrollHeight;
   }
 
   async function hash(s) {
@@ -52,22 +77,20 @@
   const fakeIp = new URLSearchParams(location.search).get('as');
   const TEST = fakeIp ? 'test:' : '';
 
-  input.disabled = true;
-  (fakeIp ? Promise.resolve({ ip: fakeIp.slice(0, 64) }) : fetch('/api/ip', { cache: 'no-store' }).then(r => r.json())).then(d => {
+  (fakeIp ? Promise.resolve({ ip: fakeIp.slice(0, 64) }) : fetch('/api/ip', { cache: 'no-store' }).then(r => r.json())
+    .then(d => d.ip ? d : Promise.reject())
+    .catch(() => fetch('https://api.ipify.org?format=json').then(r => r.json()))).then(d => {
     me = d.ip;
     if (TEST) line('[test mode]', true);
     line('your ip: ' + me, true);
     line('type the ip you want to connect to', true);
-    input.disabled = false;
-    input.focus();
   }).catch(() => line('could not get your ip, reload the page', true));
 
   function end(msg) {
     if (state === 'done') return;
     if (msg) line(msg, true);
     state = 'done';
-    input.disabled = true;
-    prompt.textContent = '>';
+    setLocked(true);
     if (peer) peer.destroy();
   }
 
@@ -90,9 +113,8 @@
       state = 'chat';
       log.textContent = '';
       line('connected to ' + target, true);
-      prompt.textContent = me + '>';
-      input.disabled = false;
-      input.focus();
+      prompt.textContent = me + ': ';
+      setLocked(false);
     }
   }
 
@@ -142,12 +164,13 @@
   form.onsubmit = (e) => {
     e.preventDefault();
     const v = input.value;
-    if (!v.trim()) return;
+    if (!v.trim() || (state === 'ip' && !me)) return;
     input.value = '';
+    sync();
     if (state === 'ip' && me) {
       state = 'waiting';
       target = v.trim().slice(0, 64);
-      input.disabled = true;
+      setLocked(true);
       start();
     } else if (state === 'chat' && conn && conn.open) {
       const text = v.slice(0, 2000);
