@@ -108,6 +108,13 @@
     if (peer) peer.destroy();
   }
 
+  // Other side left: show it for a moment, then wipe everything and go back home.
+  function left() {
+    if (state === 'done') return;
+    end(target + ' disconnected');
+    setTimeout(() => location.reload(), 1500);
+  }
+
   // Both sides may dial at once; keep the connection started by the smaller id so both agree.
   function adopt(c, initiator) {
     if (state === 'done') return c.close();
@@ -123,9 +130,9 @@
       if (d.t === 'pong') return void (pingEl.textContent = 'ping ' + Math.max(0, Date.now() - d.ts) + 'ms');
       if (d.t === 'file' && d.data) fileLine(target, d.name, d.type, d.data);
       else if (d.t === 'msg' && typeof d.text === 'string') line(target + ': ' + d.text.slice(0, 2000));
-      else if (d.t === 'bye') end(target + ' disconnected');
+      else if (d.t === 'bye') left();
     });
-    c.on('close', () => { if (c === conn) end(target + ' disconnected'); });
+    c.on('close', () => { if (c === conn) left(); });
 
     if (state !== 'chat') {
       state = 'chat';
@@ -138,7 +145,7 @@
       setLocked(false);
       // Ping every 2s; if a ping goes unanswered for 15s (big files can delay it) the other side is gone.
       const ping = () => {
-        if (unanswered && Date.now() - unanswered > 15000) return end(target + ' disconnected');
+        if (unanswered && Date.now() - unanswered > 15000) return left();
         if (!conn || !conn.open) return;
         if (!unanswered) unanswered = Date.now();
         conn.send({ t: 'ping', ts: Date.now() });
