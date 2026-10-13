@@ -121,7 +121,7 @@
 
   async function listen(tries = 0) {
     if (typeof Peer === 'undefined' || state === 'chat' || state === 'done') return;
-    inbox = new Peer(await hash('inbox>' + me), window.PEER_OPTS);
+    inbox = new Peer(await hash('inbox>' + me), await getPeerOpts());
     inbox.on('connection', c => {
       c.on('data', d => { if (d && d.t === 'req') { requesters.set(c, Date.now()); showReqs(); } });
       c.on('close', () => { requesters.delete(c); showReqs(); });
@@ -153,6 +153,22 @@
     };
     outboxTimer = setInterval(tick, 3000);
     if (peer.open) tick(); else peer.on('open', tick);
+  }
+
+  // If the other side answered but the direct link fails, say so instead of waiting silently.
+  let iceWarned = false;
+  function watchIce(c) {
+    const check = () => {
+      const pc = c.peerConnection;
+      if (!pc) return setTimeout(check, 500);
+      pc.addEventListener('iceconnectionstatechange', () => {
+        if (pc.iceConnectionState === 'failed' && state === 'waiting' && !iceWarned) {
+          iceWarned = true;
+          line(target + ' is here, but your networks are blocking the connection. still trying...', 'bad');
+        }
+      });
+    };
+    check();
   }
 
   function stopRequesting() {
@@ -222,12 +238,30 @@
     }
   }
 
+  // How browsers reach each other. STUN finds a direct path; TURN relays when
+  // networks block direct connections. Relays only pass encrypted data along.
+  const FALLBACK_ICE = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' },
+  ];
+  let peerOpts = null;
+  async function getPeerOpts() {
+    if (peerOpts) return peerOpts;
+    let extra = [];
+    try {
+      const ctl = new AbortController();
+      setTimeout(() => ctl.abort(), 3000);
+      extra = (await fetch('/api/turn', { cache: 'no-store', signal: ctl.signal }).then(r => r.json())).iceServers || [];
+    } catch {}
+    return peerOpts = Object.assign({ config: { iceServers: [...extra, ...FALLBACK_ICE] } }, window.PEER_OPTS);
+  }
+
   async function start() {
     if (typeof Peer === 'undefined') return end('error: chat library failed to load, reload the page');
-    let mine, theirs;
-    if (me === target) { const h = await hash(me + '>' + me); mine = h + 'a'; theirs = h + 'b'; }
-    else { mine = await hash(me + '>' + target); theirs = await hash(target + '>' + me); }
+    const mine = await hash(me + '>' + target), theirs = await hash(target + '>' + me);
 
+    await getPeerOpts();
     line('waiting for ' + target + ' to enter your ip...', true);
     join(mine, theirs, 0);
     request();
@@ -237,18 +271,26 @@
   // (it takes the server a while to notice it closed), keep retrying.
   function join(mine, theirs, tries) {
     if (state === 'done') return;
-    peer = new Peer(mine, window.PEER_OPTS);
+    peer = new Peer(mine, peerOpts);
+    const me_ = peer;
     peer.on('open', id => {
-      const c = peer.connect(theirs, { reliable: true });
-      c.on('open', () => adopt(c, id));
+      // keep dialing while waiting: they may arrive later, or an attempt may fail
+      let t = null, last = null;
+      const dial = () => {
+        if (peer !== me_ || state !== 'waiting') return clearInterval(t);
+        if (last && !last.open) last.close();
+        const c = last = peer.connect(theirs, { reliable: true });
+        c.on('open', () => adopt(c, id));
+        watchIce(c);
+      };
+      t = setInterval(dial, 5000);
+      dial();
     });
-    peer.on('connection', c => c.on('open', () => adopt(c, c.peer)));
+    peer.on('connection', c => { c.on('open', () => adopt(c, c.peer)); watchIce(c); });
     peer.on('error', err => {
       if (err.type === 'peer-unavailable') return; // they're not here yet, keep waiting
       if (err.type === 'unavailable-id') {
         peer.destroy();
-        // same ip on both sides: the other slot may be free
-        if (me === target && tries % 2 === 0) return join(theirs, mine, tries + 1);
         if (tries > 60) return end('someone on your ip is already waiting for ' + target);
         return setTimeout(() => join(mine, theirs, tries + 1), 2000);
       }
@@ -308,6 +350,7 @@
     input.value = '';
     sync();
     if (state === 'ip' && me) {
+      if (v.trim() === me) return line("you can't connect to your own ip", 'bad');
       state = 'waiting';
       target = v.trim().slice(0, 64);
       setLocked(true);

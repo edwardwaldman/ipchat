@@ -18,3 +18,13 @@ Nothing is stored. Messages go directly browser-to-browser over WebRTC and are n
 ## Deploy
 
 Built for Vercel: `public/index.html` is the page, `api/ip.js` returns your IP. Import the repo into Vercel, no settings needed.
+
+## If two people can't connect
+
+Some networks (strict routers, mobile carriers, work/school wifi, VPNs) block direct browser-to-browser connections. ipchat then needs a TURN relay. It tries free public relays, but those are unreliable. For a reliable one, use Cloudflare's free TURN:
+
+1. Cloudflare dashboard → Realtime → TURN Server → create a TURN key.
+2. In Vercel → Project → Settings → Environment Variables, add `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN`.
+3. Redeploy.
+
+The relay only passes along encrypted data; it can't read the chat.
