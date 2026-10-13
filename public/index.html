@@ -7,6 +7,7 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 15px monospace; }
   body { padding: 12px; box-sizing: border-box; overflow-y: auto; }
+  #keys { color: #555; font-size: 13px; margin-bottom: 8px; }
   h1 { margin: 0 0 10px; font: bold 15px monospace; color: #fff; }
   #log { white-space: pre-wrap; word-break: break-word; }
   #log .sys { color: #777; }
@@ -31,6 +32,7 @@
 </style>
 </head>
 <body>
+<div id="keys">enter: send · backspace: delete · esc: leave chat · [+]: send a file · click your ip or ipchat: go home</div>
 <h1><a id="home" href="">ipchat</a><span id="ping"></span></h1>
 <div id="log"></div>
 <div id="reqs"></div>
@@ -53,6 +55,7 @@
   const grab = () => { if (document.activeElement !== input) input.focus({ preventScroll: true }); };
   document.addEventListener('click', grab);
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && (state === 'chat' || state === 'waiting')) return goHome(e);
     if (document.activeElement === input || e.ctrlKey || e.metaKey || e.altKey) return;
     grab();
     if (e.key.length === 1) { input.value += e.key; sync(); e.preventDefault(); }
@@ -112,7 +115,7 @@
     const now = Date.now();
     for (const [c, t] of requesters) if (now - t > 8000 || !c.open) requesters.delete(c);
     const n = requesters.size;
-    reqsEl.textContent = n && state !== 'chat' && state !== 'done' ? 'an ip is requesting you (' + n + ' active)' : '';
+    reqsEl.textContent = n && state !== 'chat' && state !== 'done' ? 'an ip is requesting you (' + n + ')' : '';
   }
   setInterval(showReqs, 2000);
 
