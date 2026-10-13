@@ -1,0 +1,13 @@
+{
+  "name": "ipchat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Barebones IP-to-IP chat. Nothing is stored.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

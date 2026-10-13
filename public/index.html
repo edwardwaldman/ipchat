@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ipchat</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 15px monospace; }
+  body { display: flex; flex-direction: column; padding: 12px; box-sizing: border-box; }
+  #log { flex: 1; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  #log .sys { color: #777; }
+  form { display: flex; gap: 6px; margin-top: 8px; }
+  #prompt { color: #777; }
+  input { flex: 1; background: #000; color: #ddd; border: 0; border-bottom: 1px solid #444; font: inherit; outline: none; }
+  input:disabled { opacity: .4; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<form id="form" autocomplete="off">
+  <span id="prompt">ip&gt;</span>
+  <input id="input" autofocus>
+</form>
+<script>
+  const log = document.getElementById('log');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const prompt = document.getElementById('prompt');
+  let state = 'ip'; // ip -> waiting -> chat -> done
+
+  function line(text, sys) {
+    const div = document.createElement('div');
+    if (sys) div.className = 'sys';
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'you') {
+      line('your ip: ' + m.ip, true);
+      line('type the ip you want to connect to', true);
+    } else if (m.type === 'waiting') {
+      line('waiting for ' + m.target + ' to enter your ip...', true);
+    } else if (m.type === 'start') {
+      state = 'chat';
+      log.textContent = '';
+      line('connected to ' + m.peer, true);
+      prompt.textContent = m.me + '>';
+      input.disabled = false;
+      input.focus();
+    } else if (m.type === 'msg') {
+      line(m.from + ': ' + m.text);
+    } else if (m.type === 'left') {
+      line(m.ip + ' disconnected', true);
+      end();
+    }
+  };
+
+  ws.onclose = () => {
+    if (state !== 'done') { line('connection lost', true); end(); }
+  };
+
+  function end() {
+    state = 'done';
+    input.disabled = true;
+    prompt.textContent = '>';
+  }
+
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const v = input.value;
+    if (!v.trim() || ws.readyState !== WebSocket.OPEN) return;
+    input.value = '';
+    if (state === 'ip') {
+      state = 'waiting';
+      input.disabled = true;
+      ws.send(JSON.stringify({ type: 'connect', target: v.trim() }));
+    } else if (state === 'chat') {
+      ws.send(JSON.stringify({ type: 'msg', text: v }));
+    }
+  };
+</script>
+</body>
+</html>
