@@ -36,10 +36,12 @@
 <div id="reqs"></div>
 <div id="line"><span id="plus" title="send a file">[+]</span><span id="prompt">ip&gt; </span><span id="typed"></span><span id="cursor"></span></div>
 <form id="form" autocomplete="off"><input id="file" type="file" hidden><input id="input" autofocus autocapitalize="off" autocorrect="off" spellcheck="false"></form>
-<script src="/peerjs.min.js"></script>
+<script src="/supabase.js"></script>
 <script>
-  // Messages go directly browser-to-browser (WebRTC). The PeerJS server only
-  // helps the two browsers find each other; it never sees the chat.
+  // Messages are relayed live through Supabase Realtime "broadcast": they pass
+  // through and are never stored anywhere. Works through VPNs and firewalls.
+  const SB_URL = 'https://phutnwiwaoncduwvlfhb.supabase.co';
+  const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBodXRud2l3YW9uY2R1d3ZsZmhiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE5NjAwOTgsImV4cCI6MjEwNzUzNjA5OH0.CJjyXfc_UH95MslVjW8Pa8n9vPVMbj0mbZsIQZkSGNs';
   const log = document.getElementById('log');
   const form = document.getElementById('form');
   const input = document.getElementById('input');
@@ -71,7 +73,8 @@
   }
   window.onerror = (m) => line('error: ' + m, 'bad');
   let state = 'ip'; // ip -> waiting -> chat -> done
-  let me = null, target = null, peer = null, conn = null, connInit = null;
+  let me = null, target = null, chan = null, peerId = null;
+  const myId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
 
   function line(text, sys) {
     const div = document.createElement('div');
@@ -90,6 +93,10 @@
   const fakeIp = new URLSearchParams(location.search).get('as');
   const TEST = fakeIp ? 'test:' : '';
 
+  let sb = null;
+  try { sb = (window.SB_MOCK || supabase).createClient(SB_URL, SB_KEY, { realtime: { params: { eventsPerSecond: 40 } } }); }
+  catch { line('could not load the chat relay, reload the page', 'bad'); }
+
   (fakeIp ? Promise.resolve({ ip: fakeIp.slice(0, 64) }) : fetch('/api/ip', { cache: 'no-store' }).then(r => r.json())
     .then(d => d.ip ? d : Promise.reject())
     .catch(() => fetch('https://api.ipify.org?format=json').then(r => r.json()))).then(d => {
@@ -101,82 +108,46 @@
   }).catch(() => line('could not get your ip, reload the page', 'bad'));
 
   const pingEl = document.getElementById('ping');
-  let pingTimer = null, unanswered = 0; // when our oldest unanswered ping went out
+  let pingTimer = null, lastHeard = 0;
 
-  // Inbox: while you're not chatting, anyone who types your ip pings this so you
-  // can see how many are requesting you. Their ip is never shown or sent.
+  // Inbox: while you're not chatting, anyone who types your ip shows up here as a
+  // count. Their ip is never shown or sent.
   const reqsEl = document.getElementById('reqs');
-  let inbox = null, outbox = null, outboxTimer = null;
-  const requesters = new Map(); // conn -> last time heard
+  let inbox = null, outbox = null, reqCount = 0;
 
   function showReqs() {
-    const now = Date.now();
-    for (const [c, t] of requesters) if (now - t > 8000 || !c.open) requesters.delete(c);
-    const n = requesters.size;
-    reqsEl.textContent = n && state !== 'chat' && state !== 'done' ? 'an ip is requesting you (' + n + ')' : '';
+    reqsEl.textContent = reqCount && state !== 'chat' && state !== 'done' ? 'an ip is requesting you (' + reqCount + ')' : '';
   }
-  setInterval(showReqs, 2000);
 
-  async function listen(tries = 0) {
-    if (typeof Peer === 'undefined' || state === 'chat' || state === 'done') return;
-    inbox = new Peer(await hash('inbox>' + me), await getPeerOpts());
-    inbox.on('connection', c => {
-      c.on('data', d => { if (d && d.t === 'req') { requesters.set(c, Date.now()); showReqs(); } });
-      c.on('close', () => { requesters.delete(c); showReqs(); });
-    });
-    // another tab on this ip holds the inbox (or an old one is still closing): retry
-    inbox.on('error', err => {
-      if (err.type === 'unavailable-id' && tries < 60) { inbox.destroy(); inbox = null; setTimeout(() => listen(tries + 1), 3000); }
-    });
+  async function listen() {
+    if (!sb || state === 'chat' || state === 'done') return;
+    inbox = sb.channel(await hash('inbox>' + me), { config: { presence: { key: myId } } });
+    inbox.on('presence', { event: 'sync' }, () => {
+      const st = inbox.presenceState();
+      reqCount = Object.keys(st).filter(k => k !== myId && st[k].some(m => m.role === 'req')).length;
+      showReqs();
+    }).subscribe();
   }
 
   function stopListening() {
-    if (inbox) inbox.destroy();
-    inbox = null;
-    requesters.clear();
-    showReqs();
+    if (inbox) sb.removeChannel(inbox);
+    inbox = null; reqCount = 0; showReqs();
   }
 
-  // While waiting, keep pinging the target's inbox so they see the request.
+  // While waiting, sit in the target's inbox so they see the request.
   async function request() {
-    const box = await hash('inbox>' + target);
-    const tick = () => {
-      if (state !== 'waiting' || !peer || peer.destroyed) return stopRequesting();
-      if (peer.open && (!outbox || !outbox.open)) {
-        if (outbox) outbox.close();
-        const c = outbox = peer.connect(box, { reliable: true });
-        c.on('open', () => { if (state === 'waiting') c.send({ t: 'req' }); });
-      }
-      if (outbox && outbox.open) outbox.send({ t: 'req' });
-    };
-    outboxTimer = setInterval(tick, 3000);
-    if (peer.open) tick(); else peer.on('open', tick);
-  }
-
-  // If the other side answered but the direct link fails, say so instead of waiting silently.
-  let iceWarned = false;
-  let pending = null, foundSaid = false;
-  function watchIce(c) {
-    const check = () => {
-      const pc = c.peerConnection;
-      if (!pc) return setTimeout(check, 500);
-      pc.addEventListener('iceconnectionstatechange', () => {
-        const s = pc.iceConnectionState;
-        if (state !== 'waiting') return;
-        if ((s === 'checking' || s === 'connected') && !foundSaid) { foundSaid = true; line('found ' + target + ', connecting...', true); }
-        if (s === 'failed') {
-          if (pending && pending.c === c) pending.dead = true;
-          if (!iceWarned) { iceWarned = true; line(target + ' is here, but a network or vpn is blocking the connection. still trying... (turn off any vpn, or try another network)', 'bad'); }
-        }
-      });
-    };
-    check();
+    outbox = sb.channel(await hash('inbox>' + target), { config: { presence: { key: myId } } });
+    outbox.subscribe(st => { if (st === 'SUBSCRIBED' && outbox) outbox.track({ role: 'req' }); });
   }
 
   function stopRequesting() {
-    clearInterval(outboxTimer);
-    if (outbox) outbox.close();
+    if (outbox) sb.removeChannel(outbox);
     outbox = null;
+  }
+
+  function send(event, payload) {
+    if (!chan) return Promise.resolve();
+    return chan.send({ type: 'broadcast', event, payload: Object.assign({ from: myId }, payload) });
   }
 
   function end(msg) {
@@ -188,7 +159,7 @@
     pingEl.textContent = '';
     state = 'done';
     setLocked(true);
-    if (peer) peer.destroy();
+    if (chan) { sb.removeChannel(chan); chan = null; }
   }
 
   // Other side left: show it for a moment, then wipe everything and go back home.
@@ -198,117 +169,90 @@
     setTimeout(() => location.reload(), 1500);
   }
 
-  // Both sides may dial at once; keep the connection started by the smaller id so both agree.
-  function adopt(c, initiator) {
-    if (state === 'done') return c.close();
-    if (conn && conn !== c) {
-      if (initiator < connInit) { const old = conn; conn = c; connInit = initiator; old.close(); }
-      else return c.close();
-    } else { conn = c; connInit = initiator; }
-
-    c.on('data', d => {
-      if (c !== conn || typeof d !== 'object' || !d) return;
-      unanswered = 0;
-      if (d.t === 'ping') return c.send({ t: 'pong', ts: d.ts });
-      if (d.t === 'pong') return void (pingEl.textContent = 'ping ' + Math.max(0, Date.now() - d.ts) + 'ms');
-      if (d.t === 'file' && d.data) fileLine(target, d.name, d.type, d.data);
-      else if (d.t === 'msg' && typeof d.text === 'string') line(target + ': ' + d.text.slice(0, 2000));
-      else if (d.t === 'bye') left();
-    });
-    c.on('close', () => { if (c === conn) left(); });
-
-    if (state !== 'chat') {
-      state = 'chat';
-      stopListening();
-      stopRequesting();
-      log.textContent = '';
-      line('connected to ' + target, true);
-      prompt.textContent = me + ': ';
-      prompt.className = 'home';
-      lineEl.classList.add('chat');
-      prompt.title = 'leave chat';
-      setLocked(false);
-      // Ping every 2s; if a ping goes unanswered for 15s (big files can delay it) the other side is gone.
-      const ping = () => {
-        if (unanswered && Date.now() - unanswered > 15000) return left();
-        if (!conn || !conn.open) return;
-        if (!unanswered) unanswered = Date.now();
-        conn.send({ t: 'ping', ts: Date.now() });
-      };
-      pingTimer = setInterval(ping, 2000);
-      ping();
-    }
-  }
-
-  // How browsers reach each other. STUN finds a direct path; TURN relays when
-  // networks block direct connections. Relays only pass encrypted data along.
-  const FALLBACK_ICE = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
-    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
-    { urls: ['turn:freestun.net:3478', 'turns:freestun.net:5349'], username: 'free', credential: 'free' },
-    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' },
-  ];
-  let peerOpts = null;
-  async function getPeerOpts() {
-    if (peerOpts) return peerOpts;
-    let extra = [];
-    try {
-      const ctl = new AbortController();
-      setTimeout(() => ctl.abort(), 3000);
-      extra = (await fetch('/api/turn', { cache: 'no-store', signal: ctl.signal }).then(r => r.json())).iceServers || [];
-    } catch {}
-    if (!window.PEER_OPTS) line(extra.length ? 'relay: on' : 'relay: off (only direct connections; may fail across networks)', true);
-    return peerOpts = Object.assign({ config: { iceServers: [...extra, ...FALLBACK_ICE] } }, window.PEER_OPTS);
+  function connected(id) {
+    peerId = id;
+    state = 'chat';
+    stopListening();
+    stopRequesting();
+    log.textContent = '';
+    line('connected to ' + target, true);
+    prompt.textContent = me + ': ';
+    prompt.className = 'home';
+    lineEl.classList.add('chat');
+    prompt.title = 'leave chat';
+    setLocked(false);
+    // Ping every 5s (keeps us well inside the free message quota); 20s of silence = gone.
+    lastHeard = Date.now();
+    const ping = () => {
+      if (Date.now() - lastHeard > 20000) return left();
+      send('ping', { ts: Date.now() });
+    };
+    pingTimer = setInterval(ping, 5000);
+    ping();
   }
 
   async function start() {
-    if (typeof Peer === 'undefined') return end('error: chat library failed to load, reload the page');
-    const mine = await hash(me + '>' + target), theirs = await hash(target + '>' + me);
-
-    await getPeerOpts();
+    if (!sb) return end('error: chat relay failed to load, reload the page');
+    // Both people land in the same room: it's named after the pair of ips.
+    const room = await hash([me, target].sort().join('|'));
     line('waiting for ' + target + ' to enter your ip...', true);
-    join(mine, theirs, 0);
+    chan = sb.channel(room, { config: { broadcast: { self: false }, presence: { key: myId } } });
+
+    chan.on('presence', { event: 'sync' }, () => {
+      const st = chan.presenceState();
+      // someone at the target ip who typed our ip; oldest first so both sides agree
+      const others = Object.entries(st).map(([k, ms]) => [k, ms[0]])
+        .filter(([k, m]) => k !== myId && m && m.ip === target && m.want === me)
+        .sort((a, b) => a[1].at - b[1].at);
+      if (state === 'waiting' && others.length) connected(others[0][0]);
+      else if (state === 'chat' && !st[peerId]) left();
+    });
+
+    chan.on('broadcast', { event: 'msg' }, ({ payload: d }) => {
+      if (d.from !== peerId || typeof d.text !== 'string') return;
+      lastHeard = Date.now();
+      line(target + ': ' + d.text.slice(0, 2000));
+    });
+    chan.on('broadcast', { event: 'ping' }, ({ payload: d }) => {
+      if (d.from !== peerId) return;
+      lastHeard = Date.now();
+      send('pong', { to: d.from, ts: d.ts });
+    });
+    chan.on('broadcast', { event: 'pong' }, ({ payload: d }) => {
+      if (d.from !== peerId || d.to !== myId) return;
+      lastHeard = Date.now();
+      pingEl.textContent = 'ping ' + Math.max(0, Date.now() - d.ts) + 'ms';
+    });
+    chan.on('broadcast', { event: 'bye' }, ({ payload: d }) => { if (d.from === peerId) left(); });
+    chan.on('broadcast', { event: 'file' }, ({ payload: d }) => {
+      if (d.from !== peerId) return;
+      lastHeard = Date.now();
+      gotChunk(d);
+    });
+
+    let warned = false;
+    chan.subscribe(st => {
+      if (st === 'SUBSCRIBED') chan.track({ ip: me, want: target, at: Date.now() });
+      else if ((st === 'CHANNEL_ERROR' || st === 'TIMED_OUT') && !warned) { warned = true; line("can't reach the chat relay right now, retrying...", 'bad'); }
+    });
     request();
   }
 
-  // Register as `mine` and dial `theirs`. If our id is still held by an old tab
-  // (it takes the server a while to notice it closed), keep retrying.
-  function join(mine, theirs, tries) {
-    if (state === 'done') return;
-    peer = new Peer(mine, peerOpts);
-    const me_ = peer;
-    peer.on('open', id => {
-      // keep dialing while waiting: they may arrive later, or an attempt may fail.
-      // An attempt that is still connecting gets time to finish (relays can be slow).
-      let t = null;
-      const dial = () => {
-        if (peer !== me_ || state !== 'waiting') return clearInterval(t);
-        if (pending && !pending.dead && Date.now() - pending.at < 20000) return;
-        if (pending && !pending.c.open) pending.c.close();
-        const c = peer.connect(theirs, { reliable: true });
-        pending = { c, at: Date.now(), dead: false };
-        c.on('open', () => adopt(c, id));
-        watchIce(c);
-      };
-      t = setInterval(dial, 3000);
-      dial();
-    });
-    peer.on('connection', c => { c.on('open', () => adopt(c, c.peer)); watchIce(c); });
-    peer.on('error', err => {
-      if (err.type === 'peer-unavailable') { if (pending && String(err.message).includes(theirs)) pending.dead = true; return; } // not here yet, keep waiting
-      if (err.type === 'unavailable-id') {
-        peer.destroy();
-        if (tries > 60) return end('someone on your ip is already waiting for ' + target);
-        return setTimeout(() => join(mine, theirs, tries + 1), 2000);
-      }
-      if (state !== 'chat') end('error: ' + err.type);
-    });
-  }
-
-  // Files go straight to the other person like messages. Nothing is uploaded anywhere.
-  const MAX_FILE = 25 * 1024 * 1024;
+  // Files are sent in small pieces through the relay and rebuilt on the other side.
+  // Nothing is uploaded or stored anywhere.
+  const MAX_FILE = 10 * 1024 * 1024, CHUNK = 96 * 1024;
   const fileInput = document.getElementById('file');
   const size = (n) => n < 1024 ? n + 'b' : n < 1048576 ? (n / 1024).toFixed(0) + 'kb' : (n / 1048576).toFixed(1) + 'mb';
+  const incoming = {};
+  const toB64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+  const fromB64 = (b) => Uint8Array.from(atob(b), c => c.charCodeAt(0));
+
+  function gotChunk(d) {
+    if (typeof d.id !== 'string' || !(d.n > 0) || d.n > 200) return;
+    const f = incoming[d.id] || (incoming[d.id] = { parts: [], got: 0 });
+    if (!f.parts[d.i]) { f.parts[d.i] = fromB64(d.b); f.got++; }
+    if (f.got === d.n) { delete incoming[d.id]; fileLine(target, d.name, d.type, new Blob(f.parts)); }
+  }
 
   function fileLine(from, name, type, data) {
     const blob = new Blob([data], { type: String(type || '') });
@@ -329,23 +273,31 @@
   fileInput.addEventListener('change', async () => {
     const f = fileInput.files[0];
     fileInput.value = '';
-    if (!f || state !== 'chat' || !conn || !conn.open) return;
-    if (f.size > MAX_FILE) return line('file too big (max 25mb)', 'bad');
-    const data = await f.arrayBuffer();
-    conn.send({ t: 'file', name: f.name, type: f.type, data });
-    fileLine(me, f.name, f.type, data);
+    if (!f || state !== 'chat') return;
+    if (f.size > MAX_FILE) return line('file too big (max 10mb)', 'bad');
+    const u8 = new Uint8Array(await f.arrayBuffer());
+    const n = Math.max(1, Math.ceil(u8.length / CHUNK)), id = myId + ':' + Date.now();
+    const status = document.createElement('div'); status.className = 'sys'; log.appendChild(status);
+    for (let i = 0; i < n; i++) {
+      if (state !== 'chat') return;
+      status.textContent = 'sending ' + f.name + '... ' + Math.round(i / n * 100) + '%';
+      await send('file', { id, i, n, name: f.name, type: f.type, b: toB64(u8.subarray(i * CHUNK, (i + 1) * CHUNK)) });
+      await new Promise(r => setTimeout(r, 40));
+    }
+    status.remove();
+    fileLine(me, f.name, f.type, u8);
     grab();
   });
 
-  function sayBye() { if (conn && conn.open) try { conn.send({ t: 'bye' }); } catch {} }
-  window.addEventListener('pagehide', () => { sayBye(); if (peer) peer.destroy(); stopListening(); });
+  function sayBye() { if (state === 'chat') try { send('bye', {}); } catch {} }
+  window.addEventListener('pagehide', () => { sayBye(); });
 
   // Clicking "ipchat" or your ip leaves the chat and goes back to the start.
   function goHome(e) {
     e.preventDefault();
     e.stopPropagation();
     sayBye();
-    setTimeout(() => { if (peer) peer.destroy(); stopListening(); location.reload(); }, 100);
+    setTimeout(() => location.reload(), 150);
   }
   document.getElementById('home').addEventListener('click', goHome);
   prompt.addEventListener('click', (e) => { if (state === 'chat') goHome(e); });
@@ -362,9 +314,9 @@
       target = v.trim().slice(0, 64);
       setLocked(true);
       start();
-    } else if (state === 'chat' && conn && conn.open) {
+    } else if (state === 'chat') {
       const text = v.slice(0, 2000);
-      conn.send({ t: 'msg', text });
+      send('msg', { text });
       line(me + ': ' + text);
     }
   };

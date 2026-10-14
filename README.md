@@ -13,18 +13,8 @@ Barebones IP-to-IP chat.
 1.1.1.1 disconnected
 ```
 
-Nothing is stored. Messages go directly browser-to-browser over WebRTC and are never sent to or saved on any server. The free PeerJS server is only used so the two browsers can find each other. Close the tab and it's gone.
+Nothing is stored. Messages and files are relayed live through Supabase Realtime broadcast (a free project), which passes them along without saving them. That works through VPNs and strict networks. Close the tab and it's gone.
 
 ## Deploy
 
-Built for Vercel: `public/index.html` is the page, `api/ip.js` returns your IP. Import the repo into Vercel, no settings needed.
-
-## If two people can't connect
-
-Some networks (strict routers, mobile carriers, work/school wifi, VPNs) block direct browser-to-browser connections. ipchat then needs a TURN relay. It tries free public relays, but those are unreliable. For a reliable one, use Cloudflare's free TURN:
-
-1. Cloudflare dashboard → Realtime → TURN Server → create a TURN key.
-2. In Vercel → Project → Settings → Environment Variables, add `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN`.
-3. Redeploy.
-
-The relay only passes along encrypted data; it can't read the chat.
+Built for Vercel: `public/index.html` is the page, `api/ip.js` returns your IP. The Supabase project URL and public (anon) key are in the page; they only allow realtime broadcast, and the project is on the free plan, so it can't be billed. Import the repo into Vercel, no settings needed.
