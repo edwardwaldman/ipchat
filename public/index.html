@@ -74,7 +74,15 @@
   window.onerror = (m) => line('error: ' + m, 'bad');
   let state = 'ip'; // ip -> waiting -> chat -> done
   let me = null, target = null, chan = null, peerId = null;
-  const myId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
+  // The chat survives a refresh (sessionStorage), but is gone when the tab closes.
+  const SKEY = 'ipchat:' + (new URLSearchParams(location.search).get('as') || '');
+  let sess = {};
+  try { sess = JSON.parse(sessionStorage.getItem(SKEY) || '{}') || {}; } catch {}
+  const save = () => { try { sessionStorage.setItem(SKEY, JSON.stringify(sess)); } catch {} };
+  const forget = () => { try { sessionStorage.removeItem(SKEY); } catch {} sess = {}; };
+  const myId = sess.id || (sess.id = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)));
+  save();
+  function chatLine(text) { line(text); (sess.msgs = sess.msgs || []).push(text); if (sess.msgs.length > 300) sess.msgs.shift(); save(); }
 
   function line(text, sys) {
     const div = document.createElement('div');
@@ -104,11 +112,14 @@
     if (TEST) line('[test mode]', true);
     line('your ip: ' + me, true);
     line('type the ip you want to connect to', true);
-    listen();
+    if (sess.me === me && sess.target) {
+      // refreshed mid-chat: go straight back into the same room
+      state = 'waiting'; target = sess.target; setLocked(true); start();
+    } else listen();
   }).catch(() => line('could not get your ip, reload the page', 'bad'));
 
   const pingEl = document.getElementById('ping');
-  let pingTimer = null, lastHeard = 0;
+  let pingTimer = null, lastHeard = 0, graceTimer = null;
 
   // Inbox: while you're not chatting, anyone who types your ip shows up here as a
   // count. Their ip is never shown or sent.
@@ -126,7 +137,7 @@
       const st = inbox.presenceState();
       reqCount = Object.keys(st).filter(k => k !== myId && st[k].some(m => m.role === 'req')).length;
       showReqs();
-    }).subscribe();
+    }).subscribe(st => { if (st === 'SUBSCRIBED' && inbox) inbox.track({ role: 'box' }); });
   }
 
   function stopListening() {
@@ -165,6 +176,7 @@
   // Other side left: show it for a moment, then wipe everything and go back home.
   function left() {
     if (state === 'done') return;
+    forget();
     end(target + ' disconnected');
     setTimeout(() => location.reload(), 1500);
   }
@@ -176,6 +188,8 @@
     stopRequesting();
     log.textContent = '';
     line('connected to ' + target, true);
+    if (sess.target === target && sess.msgs) sess.msgs.forEach(m => line(m));
+    else { sess.me = me; sess.target = target; sess.msgs = []; save(); }
     prompt.textContent = me + ': ';
     prompt.className = 'home';
     lineEl.classList.add('chat');
@@ -205,13 +219,17 @@
         .filter(([k, m]) => k !== myId && m && m.ip === target && m.want === me)
         .sort((a, b) => a[1].at - b[1].at);
       if (state === 'waiting' && others.length) connected(others[0][0]);
-      else if (state === 'chat' && !st[peerId]) left();
+      else if (state === 'chat') {
+        if (st[peerId]) { clearTimeout(graceTimer); graceTimer = null; }
+        else if (!graceTimer) graceTimer = setTimeout(() => { graceTimer = null; const s2 = chan && chan.presenceState(); if (state === 'chat' && s2 && !s2[peerId]) left(); }, 6000);
+      }
     });
 
     chan.on('broadcast', { event: 'msg' }, ({ payload: d }) => {
       if (d.from !== peerId || typeof d.text !== 'string') return;
       lastHeard = Date.now();
-      line(target + ': ' + d.text.slice(0, 2000));
+      if (!allow(inRate, 8)) return; // ignore floods (more than 8 messages a second)
+      chatLine(target + ': ' + d.text.slice(0, 2000));
     });
     chan.on('broadcast', { event: 'ping' }, ({ payload: d }) => {
       if (d.from !== peerId) return;
@@ -240,19 +258,32 @@
 
   // Files are sent in small pieces through the relay and rebuilt on the other side.
   // Nothing is uploaded or stored anywhere.
-  const MAX_FILE = 10 * 1024 * 1024, CHUNK = 96 * 1024;
+  // Limits: 5mb per file, one file at a time. Pieces are 48kb so they fit the
+  // relay's message size limit. The receiver enforces the same limits.
+  const MAX_FILE = 5 * 1024 * 1024, CHUNK = 48 * 1024, MAX_PARTS = Math.ceil(MAX_FILE / CHUNK);
   const fileInput = document.getElementById('file');
   const size = (n) => n < 1024 ? n + 'b' : n < 1048576 ? (n / 1024).toFixed(0) + 'kb' : (n / 1048576).toFixed(1) + 'mb';
   const incoming = {};
   const toB64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   const fromB64 = (b) => Uint8Array.from(atob(b), c => c.charCodeAt(0));
+  const inRate = [], outRate = [];
+  function allow(arr, perSec) { const now = Date.now(); while (arr.length && now - arr[0] > 1000) arr.shift(); if (arr.length >= perSec) return false; arr.push(now); return true; }
+  let sending = false;
 
   function gotChunk(d) {
-    if (typeof d.id !== 'string' || !(d.n > 0) || d.n > 200) return;
-    const f = incoming[d.id] || (incoming[d.id] = { parts: [], got: 0 });
-    if (!f.parts[d.i]) { f.parts[d.i] = fromB64(d.b); f.got++; }
-    if (f.got === d.n) { delete incoming[d.id]; fileLine(target, d.name, d.type, new Blob(f.parts)); }
+    if (typeof d.id !== 'string' || typeof d.b !== 'string' || !(d.n > 0) || d.n > MAX_PARTS || !(d.i >= 0 && d.i < d.n)) return;
+    if (d.b.length > CHUNK * 1.4) return;
+    if (!incoming[d.id] && Object.keys(incoming).length >= 2) return; // at most 2 files arriving at once
+    const f = incoming[d.id] || (incoming[d.id] = { parts: [], got: 0, bytes: 0, at: Date.now(), el: null });
+    if (f.parts[d.i]) return;
+    f.parts[d.i] = fromB64(d.b); f.got++; f.bytes += f.parts[d.i].length;
+    if (f.bytes > MAX_FILE) { delete incoming[d.id]; if (f.el) f.el.remove(); return line('blocked a file over 5mb', 'bad'); }
+    if (!f.el) { f.el = document.createElement('div'); f.el.className = 'sys'; log.appendChild(f.el); }
+    f.el.textContent = 'receiving ' + String(d.name || 'file').slice(0, 100) + '... ' + Math.round(f.got / d.n * 100) + '%';
+    if (f.got === d.n) { delete incoming[d.id]; f.el.remove(); fileLine(target, d.name, d.type, new Blob(f.parts)); }
   }
+  // drop half-received files that stalled
+  setInterval(() => { for (const k in incoming) if (Date.now() - incoming[k].at > 120000) { if (incoming[k].el) incoming[k].el.remove(); delete incoming[k]; } }, 10000);
 
   function fileLine(from, name, type, data) {
     const blob = new Blob([data], { type: String(type || '') });
@@ -264,6 +295,7 @@
     div.append(from + ': [file] ', a, ' (' + size(blob.size) + ')');
     log.appendChild(div);
     document.body.scrollTop = document.body.scrollHeight;
+    (sess.msgs = sess.msgs || []).push(from + ': [file] ' + String(name || 'file').slice(0, 200) + ' (' + size(blob.size) + ', not kept after refresh)'); save();
   }
 
   document.getElementById('plus').addEventListener('click', (e) => {
@@ -274,29 +306,35 @@
     const f = fileInput.files[0];
     fileInput.value = '';
     if (!f || state !== 'chat') return;
-    if (f.size > MAX_FILE) return line('file too big (max 10mb)', 'bad');
+    if (sending) return line('wait for the current file to finish', 'bad');
+    if (f.size > MAX_FILE) return line('file too big (max 5mb)', 'bad');
+    sending = true;
     const u8 = new Uint8Array(await f.arrayBuffer());
     const n = Math.max(1, Math.ceil(u8.length / CHUNK)), id = myId + ':' + Date.now();
     const status = document.createElement('div'); status.className = 'sys'; log.appendChild(status);
-    for (let i = 0; i < n; i++) {
-      if (state !== 'chat') return;
-      status.textContent = 'sending ' + f.name + '... ' + Math.round(i / n * 100) + '%';
-      await send('file', { id, i, n, name: f.name, type: f.type, b: toB64(u8.subarray(i * CHUNK, (i + 1) * CHUNK)) });
-      await new Promise(r => setTimeout(r, 40));
-    }
-    status.remove();
-    fileLine(me, f.name, f.type, u8);
-    grab();
+    try {
+      for (let i = 0; i < n; i++) {
+        if (state !== 'chat') return;
+        status.textContent = 'sending ' + f.name + '... ' + Math.round(i / n * 100) + '%';
+        const piece = { id, i, n, name: f.name.slice(0, 200), type: f.type.slice(0, 100), b: toB64(u8.subarray(i * CHUNK, (i + 1) * CHUNK)) };
+        let r = await send('file', piece);
+        for (let k = 0; k < 4 && r !== 'ok'; k++) { await new Promise(res => setTimeout(res, 300)); r = await send('file', piece); }
+        if (r !== 'ok') { status.remove(); return line('file failed to send, try again', 'bad'); }
+        await new Promise(res => setTimeout(res, 60));
+      }
+      status.remove();
+      fileLine(me, f.name, f.type, u8);
+    } finally { sending = false; grab(); }
   });
 
   function sayBye() { if (state === 'chat') try { send('bye', {}); } catch {} }
-  window.addEventListener('pagehide', () => { sayBye(); });
 
   // Clicking "ipchat" or your ip leaves the chat and goes back to the start.
   function goHome(e) {
     e.preventDefault();
     e.stopPropagation();
     sayBye();
+    forget();
     setTimeout(() => location.reload(), 150);
   }
   document.getElementById('home').addEventListener('click', goHome);
@@ -316,8 +354,9 @@
       start();
     } else if (state === 'chat') {
       const text = v.slice(0, 2000);
+      if (!allow(outRate, 5)) { input.value = v; sync(); return line('slow down', 'bad'); }
       send('msg', { text });
-      line(me + ': ' + text);
+      chatLine(me + ': ' + text);
     }
   };
 </script>
