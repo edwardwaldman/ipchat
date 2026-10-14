@@ -22,6 +22,10 @@
   #log a { color: #8ab4f8; }
   #ping { color: #777; font-weight: normal; margin-left: 10px; }
   #ping.ok { color: #6c6; }
+  #donate { position: fixed; top: 12px; right: 12px; max-width: 46%; text-align: right; color: #555; font-size: 12px; word-break: break-all; cursor: pointer; }
+  #donate:hover { color: #999; }
+  #donate b { color: #888; font-weight: normal; }
+  @media (max-width: 600px) { #donate { position: static; max-width: none; margin-bottom: 8px; } }
   #ping.slow { color: #f44; }
   #line { white-space: pre-wrap; word-break: break-word; cursor: text; }
   #line.locked { display: none; }
@@ -33,6 +37,7 @@
 </style>
 </head>
 <body>
+<div id="donate" title="click to copy">donate SOL here: <b id="sol">BdTL1SgwFcYvoKCAvtNKNnedtQwffCU34CaosNSTHTYK</b></div>
 <h1><a id="home" href="">ipchat</a><span id="ping"></span></h1>
 <div id="log"></div>
 <div id="reqs"></div>

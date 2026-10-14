@@ -362,6 +362,16 @@ function goHome(e) {
   setTimeout(() => location.reload(), 150);
 }
 document.getElementById('home').addEventListener('click', goHome);
+
+// donation address: click to copy
+const donateEl = document.getElementById('donate');
+donateEl.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const addr = document.getElementById('sol').textContent;
+  (navigator.clipboard ? navigator.clipboard.writeText(addr) : Promise.reject()).then(() => {
+    const b = document.getElementById('sol'); b.textContent = 'copied'; setTimeout(() => { b.textContent = addr; grab(); }, 1200);
+  }).catch(() => {});
+});
 prompt.addEventListener('click', (e) => { if (state === 'chat') goHome(e); });
 
 function validIp(v) {
