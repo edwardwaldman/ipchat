@@ -79,6 +79,16 @@ catch { line('could not load the chat relay, reload the page', 'bad'); }
 }).catch(() => line('could not get your ip, reload the page', 'bad'));
 
 const pingEl = document.getElementById('ping');
+// "11ms (stable)" / "500ms (unstable)" from the last few round trips
+const pings = [];
+function showPing(ms) {
+  pings.push(ms); if (pings.length > 5) pings.shift();
+  const avg = Math.round(pings.reduce((a, b) => a + b, 0) / pings.length);
+  const jitter = Math.max(...pings) - Math.min(...pings);
+  const stable = avg < 250 && jitter < 150;
+  pingEl.textContent = ms + 'ms (' + (stable ? 'stable' : 'unstable') + ')';
+  pingEl.className = stable ? 'ok' : 'slow';
+}
 let pingTimer = null, lastHeard = 0, graceTimer = null;
 
 // Inbox: while you're not chatting, anyone who types your ip shows up here as a
@@ -134,11 +144,22 @@ async function initKeys() {
   }
   myPk = toB64(new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey)));
 }
-async function setPeerKey(pk) {
-  const pub = await crypto.subtle.importKey('raw', fromB64(pk), EC, false, []);
-  aesKey = await crypto.subtle.deriveKey({ name: 'ECDH', public: pub }, keyPair.privateKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode([myPk, pk].sort().join('|'))));
-  return [...h.slice(0, 6)].map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase().match(/.{4}/g).join('-');
+// One key per possible match (a person can show up twice for a moment, e.g. an old
+// tab the relay hasn't dropped yet). Whoever actually sends us a message we can
+// decrypt is the real one, because they can only encrypt for us if they chose us.
+const peerKeys = {}; // presence key -> Promise<{ pk, key, code }>
+function keyFor(id, pk) {
+  const k = peerKeys[id];
+  if (k && k.pk === pk) return k.p;
+  const p = (async () => {
+    const pub = await crypto.subtle.importKey('raw', fromB64(pk), EC, false, []);
+    const key = await crypto.subtle.deriveKey({ name: 'ECDH', public: pub }, keyPair.privateKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode([myPk, pk].sort().join('|'))));
+    const code = [...h.slice(0, 6)].map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase().match(/.{4}/g).join('-');
+    return { key, code };
+  })();
+  peerKeys[id] = { pk, p };
+  return p;
 }
 async function send(event, payload) {
   if (!chan || !aesKey) return 'not ready';
@@ -172,7 +193,7 @@ async function connected(id, pk) {
   peerId = id;
   state = 'chat';
   let code;
-  try { code = await setPeerKey(pk); } catch { return end('error: could not set up encryption'); }
+  try { const k = await keyFor(id, pk); aesKey = k.key; code = k.code; } catch { return end('error: could not set up encryption'); }
   stopListening();
   stopRequesting();
   log.textContent = '';
@@ -185,14 +206,20 @@ async function connected(id, pk) {
   lineEl.classList.add('chat');
   prompt.title = 'leave chat';
   setLocked(false);
-  // Ping every 5s (keeps us well inside the free message quota); 20s of silence = gone.
+  // Ping every 4s (well inside the free message quota); 20s of silence = gone.
   lastHeard = Date.now();
   const ping = () => {
     if (Date.now() - lastHeard > 20000) return left();
     send('ping', { ts: Date.now() });
   };
-  pingTimer = setInterval(ping, 5000);
+  pingTimer = setInterval(ping, 4000);
   ping();
+}
+
+let candidates = new Set();
+async function switchPeer(id, pk) {
+  if (id === peerId) return;
+  try { const k = await keyFor(id, pk); peerId = id; aesKey = k.key; line('safety code updated: ' + k.code, true); } catch {}
 }
 
 async function start() {
@@ -205,13 +232,17 @@ async function start() {
 
   chan.on('presence', { event: 'sync' }, () => {
     const st = chan.presenceState();
-    // someone at the target ip who typed our ip; oldest first so both sides agree
-    const others = Object.entries(st).map(([k, ms]) => [k, ms[0]])
+    // someone at the target ip who typed our ip; newest first (old tabs linger a while)
+    const newest = ms => ms.reduce((a, b) => ((b && b.at) > (a && a.at) ? b : a), ms[0]);
+    const others = Object.entries(st).map(([k, ms]) => [k, newest(ms)])
       .filter(([k, m]) => k !== myId && m && m.ip === target && m.want === me && typeof m.pk === 'string' && m.pk.length < 200)
-      .sort((a, b) => a[1].at - b[1].at);
+      .sort((a, b) => b[1].at - a[1].at);
+    candidates = new Set(others.map(o => o[0]));
+    others.forEach(([k, m]) => keyFor(k, m.pk).catch(() => {}));
     if (state === 'waiting' && others.length) connected(others[0][0], others[0][1].pk);
     else if (state === 'chat') {
       if (st[peerId]) { clearTimeout(graceTimer); graceTimer = null; }
+      else if (others.length) switchPeer(others[0][0], others[0][1].pk);
       else if (!graceTimer) graceTimer = setTimeout(() => { graceTimer = null; const s2 = chan && chan.presenceState(); if (state === 'chat' && s2 && !s2[peerId]) left(); }, 6000);
     }
   });
@@ -219,17 +250,22 @@ async function start() {
   const handle = {
     msg(d) { if (typeof d.text !== 'string' || !allow(inRate, 8)) return; chatLine(target + ': ' + d.text.slice(0, 2000)); },
     ping(d) { send('pong', { to: d.from, ts: d.ts }); },
-    pong(d) { if (d.to === myId) pingEl.textContent = 'ping ' + Math.max(0, Date.now() - d.ts) + 'ms'; },
+    pong(d) { if (d.to === myId) showPing(Math.max(0, Date.now() - d.ts)); },
     bye() { left(); },
     file(d) { gotChunk(d); },
   };
   chan.on('broadcast', { event: 'x' }, ({ payload: p }) => {
-    if (!p || p.from !== peerId || !aesKey || typeof p.iv !== 'string' || typeof p.ct !== 'string' || p.ct.length > 90000) return;
+    if (!p || state !== 'chat' || typeof p.iv !== 'string' || typeof p.ct !== 'string' || p.ct.length > 90000) return;
+    if (p.from !== peerId && !candidates.has(p.from)) return;
+    const k = peerKeys[p.from];
+    if (!k) return;
     // decrypt in order; anything that fails to decrypt (wrong key, tampered) is dropped
     inQ = inQ.then(async () => {
-      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(p.iv) }, aesKey, fromB64(p.ct));
+      const { key, code } = await k.p;
+      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(p.iv) }, key, fromB64(p.ct));
       const d = JSON.parse(new TextDecoder().decode(pt));
-      if (!d || d.from !== peerId || !Object.hasOwn(handle, d.e)) return;
+      if (!d || d.from !== p.from || !Object.hasOwn(handle, d.e)) return;
+      if (p.from !== peerId) { peerId = p.from; aesKey = key; line('safety code updated: ' + code, true); }
       lastHeard = Date.now();
       handle[d.e](d);
     }).catch(() => {});
