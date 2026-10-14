@@ -257,6 +257,7 @@
       setTimeout(() => ctl.abort(), 3000);
       extra = (await fetch('/api/turn', { cache: 'no-store', signal: ctl.signal }).then(r => r.json())).iceServers || [];
     } catch {}
+    if (!window.PEER_OPTS) line(extra.length ? 'relay: on' : 'relay: off (only direct connections; may fail across networks)', true);
     return peerOpts = Object.assign({ config: { iceServers: [...extra, ...FALLBACK_ICE] } }, window.PEER_OPTS);
   }
 
