@@ -17,4 +17,4 @@ Nothing is stored. Messages and files are relayed live through Supabase Realtime
 
 ## Deploy
 
-Built for Vercel: `public/index.html` is the page, `api/ip.js` returns your IP. The Supabase project URL and public (anon) key are in the page; they only allow realtime broadcast, and the project is on the free plan, so it can't be billed. Import the repo into Vercel, no settings needed.
+Built for Vercel: `public/index.html` is the page, `api/ip.js` returns your IP. The Supabase project URL and public (anon) key are in the page; the project has no tables or data (it is only used for realtime broadcast), and it is on the free plan, so it can't be billed. Import the repo into Vercel, no settings needed.
