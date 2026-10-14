@@ -155,14 +155,18 @@
 
   // If the other side answered but the direct link fails, say so instead of waiting silently.
   let iceWarned = false;
+  let pending = null, foundSaid = false;
   function watchIce(c) {
     const check = () => {
       const pc = c.peerConnection;
       if (!pc) return setTimeout(check, 500);
       pc.addEventListener('iceconnectionstatechange', () => {
-        if (pc.iceConnectionState === 'failed' && state === 'waiting' && !iceWarned) {
-          iceWarned = true;
-          line(target + ' is here, but your networks are blocking the connection. still trying...', 'bad');
+        const s = pc.iceConnectionState;
+        if (state !== 'waiting') return;
+        if ((s === 'checking' || s === 'connected') && !foundSaid) { foundSaid = true; line('found ' + target + ', connecting...', true); }
+        if (s === 'failed') {
+          if (pending && pending.c === c) pending.dead = true;
+          if (!iceWarned) { iceWarned = true; line(target + ' is here, but a network or vpn is blocking the connection. still trying... (turn off any vpn, or try another network)', 'bad'); }
         }
       });
     };
@@ -241,6 +245,7 @@
   const FALLBACK_ICE = [
     { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
     { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+    { urls: ['turn:freestun.net:3478', 'turns:freestun.net:5349'], username: 'free', credential: 'free' },
     { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' },
   ];
   let peerOpts = null;
@@ -272,21 +277,24 @@
     peer = new Peer(mine, peerOpts);
     const me_ = peer;
     peer.on('open', id => {
-      // keep dialing while waiting: they may arrive later, or an attempt may fail
-      let t = null, last = null;
+      // keep dialing while waiting: they may arrive later, or an attempt may fail.
+      // An attempt that is still connecting gets time to finish (relays can be slow).
+      let t = null;
       const dial = () => {
         if (peer !== me_ || state !== 'waiting') return clearInterval(t);
-        if (last && !last.open) last.close();
-        const c = last = peer.connect(theirs, { reliable: true });
+        if (pending && !pending.dead && Date.now() - pending.at < 20000) return;
+        if (pending && !pending.c.open) pending.c.close();
+        const c = peer.connect(theirs, { reliable: true });
+        pending = { c, at: Date.now(), dead: false };
         c.on('open', () => adopt(c, id));
         watchIce(c);
       };
-      t = setInterval(dial, 5000);
+      t = setInterval(dial, 3000);
       dial();
     });
     peer.on('connection', c => { c.on('open', () => adopt(c, c.peer)); watchIce(c); });
     peer.on('error', err => {
-      if (err.type === 'peer-unavailable') return; // they're not here yet, keep waiting
+      if (err.type === 'peer-unavailable') { if (pending && String(err.message).includes(theirs)) pending.dead = true; return; } // not here yet, keep waiting
       if (err.type === 'unavailable-id') {
         peer.destroy();
         if (tries > 60) return end('someone on your ip is already waiting for ' + target);
