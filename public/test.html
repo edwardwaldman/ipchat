@@ -22,20 +22,13 @@
 <main>
   <section>
     <div class="bar">1.1.1.1 <button data-side="a" data-act="close">disconnect</button><button data-side="a" data-act="open">reopen</button></div>
-    <iframe id="a" src="/?as=1.1.1.1" onload="this.contentWindow.focus()"></iframe>
+    <iframe id="a" src="/?as=1.1.1.1"></iframe>
   </section>
   <section>
     <div class="bar">1.2.3.4 <button data-side="b" data-act="close">disconnect</button><button data-side="b" data-act="open">reopen</button></div>
     <iframe id="b" src="/?as=1.2.3.4"></iframe>
   </section>
 </main>
-<script>
-  const urls = { a: '/?as=1.1.1.1', b: '/?as=1.2.3.4' };
-  document.querySelectorAll('button').forEach(btn => btn.onclick = () => {
-    const f = document.getElementById(btn.dataset.side);
-    // "disconnect" acts like closing the tab; "reopen" is a fresh tab
-    f.src = btn.dataset.act === 'close' ? 'about:blank' : urls[btn.dataset.side];
-  });
-</script>
+<script src="/test.js"></script>
 </body>
 </html>
