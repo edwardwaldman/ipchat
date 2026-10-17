@@ -13,6 +13,8 @@
   #log .bad { color: #f44; }
   #reqs { color: #e5c07b; }
   #reqs:empty { display: none; }
+  #grp { color: #7fc8d6; }
+  #grp:empty { display: none; }
   #home { color: inherit; text-decoration: none; }
   #prompt.home { cursor: pointer; }
   #prompt.home:hover, #home:hover { text-decoration: underline; }
@@ -41,6 +43,7 @@
 <h1><a id="home" href="">ipchat</a><span id="ping"></span></h1>
 <div id="log"></div>
 <div id="reqs"></div>
+<div id="grp"></div>
 <div id="line"><span id="plus" title="send a file">[+]</span><span id="prompt">ip&gt; </span><span id="typed"></span><span id="cursor"></span></div>
 <form id="form" autocomplete="off"><input id="file" type="file" hidden><input id="input" autofocus autocapitalize="off" autocorrect="off" spellcheck="false"></form>
 <script src="/supabase.js"></script>

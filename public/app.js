@@ -71,11 +71,12 @@ catch { line('could not load the chat relay, reload the page', 'bad'); }
   me = d.ip;
   if (TEST) line('[test mode]', true);
   line('your ip: ' + me, true);
-  line('type the ip you want to connect to', true);
-  if (sess.me === me && sess.target) {
+  line('type the ip you want to connect to (or your own ip for a group chat with everyone on it)', true);
+  if (sess.me === me && sess.target === me) startGroup(); // refreshed mid group chat
+  else if (sess.me === me && sess.target) {
     // refreshed mid-chat: go straight back into the same room
     state = 'waiting'; target = sess.target; setLocked(true); start();
-  } else listen();
+  } else { listen(); watchGroup(); }
 }).catch(() => line('could not get your ip, reload the page', 'bad'));
 
 const pingEl = document.getElementById('ping');
@@ -113,6 +114,8 @@ async function listen() {
 function stopListening() {
   if (inbox) sb.removeChannel(inbox);
   inbox = null; reqCount = 0; showReqs();
+  if (lobby) sb.removeChannel(lobby);
+  lobby = null; grpEl.textContent = '';
 }
 
 // While waiting, sit in the target's inbox so they see the request.
@@ -162,6 +165,7 @@ function keyFor(id, pk) {
   return p;
 }
 async function send(event, payload) {
+  if (group) return sendGroup(event, payload);
   if (!chan || !aesKey) return 'not ready';
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const body = new TextEncoder().encode(JSON.stringify(Object.assign({ e: event, from: myId }, payload)));
@@ -220,6 +224,114 @@ let candidates = new Set();
 async function switchPeer(id, pk) {
   if (id === peerId) return;
   try { const k = await keyFor(id, pk); peerId = id; aesKey = k.key; line('safety code updated: ' + k.code, true); } catch {}
+}
+
+// ---------- group chat: everyone on the same ip ----------
+// Typing your own ip joins a room shared by everyone on that ip. Each message gets a
+// fresh AES key; that key is wrapped separately for every member with the pairwise
+// ECDH key, so it's still one relay message and still end-to-end encrypted.
+let group = false, lobby = null, myTag = '', groupPingTimer = null;
+const members = {}; // presence key -> { pk, key, tag, gone }
+const grpEl = document.getElementById('grp');
+const tagOf = async pk => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pk)))].slice(0, 2).map(b => b.toString(16).padStart(2, '0')).join('');
+const who = id => me + ' (' + (id === myId ? myTag : members[id] ? members[id].tag : '????') + ')';
+
+// home screen: how many people are in your ip's group right now
+async function watchGroup() {
+  if (!sb) return;
+  lobby = sb.channel(await hash('group|' + me), { config: { presence: { key: myId } } });
+  lobby.on('presence', { event: 'sync' }, () => {
+    const st = lobby.presenceState();
+    const n = Object.keys(st).filter(k => k !== myId && st[k].some(m => m.group)).length;
+    grpEl.textContent = n && state === 'ip' ? n + (n === 1 ? ' person is' : ' people are') + " in your ip's group chat. type your ip to join" : '';
+  }).subscribe(st => { if (st === 'SUBSCRIBED' && lobby) lobby.track({ watch: true }); });
+}
+
+async function sendGroup(event, payload, only) {
+  if (!chan) return 'not ready';
+  const ids = (only || Object.keys(members)).filter(i => members[i] && members[i].key);
+  if (!ids.length) return 'ok'; // nobody else here yet
+  const ck = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', ck));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, ck, new TextEncoder().encode(JSON.stringify(Object.assign({ e: event, from: myId }, payload)))));
+  const keys = {};
+  for (const id of ids) {
+    const wiv = crypto.getRandomValues(new Uint8Array(12));
+    keys[id] = { iv: toB64(wiv), k: toB64(new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: wiv }, members[id].key, raw))) };
+  }
+  return chan.send({ type: 'broadcast', event: 'g', payload: { from: myId, iv: toB64(iv), ct: toB64(ct), keys } });
+}
+
+async function startGroup() {
+  if (!sb) return end('error: chat relay failed to load, reload the page');
+  try { await initKeys(); } catch { return end('error: this browser does not support encryption'); }
+  myTag = await tagOf(myPk);
+  group = true; target = me; state = 'chat';
+  stopListening();
+  log.textContent = '';
+  line('group chat for everyone on ' + me + '. end-to-end encrypted.', true);
+  line('you are ' + who(myId), true);
+  if (sess.target === me && sess.msgs) sess.msgs.forEach(m => line(m));
+  else { sess.me = me; sess.target = me; sess.msgs = []; save(); }
+  prompt.textContent = who(myId) + ': ';
+  prompt.className = 'home';
+  lineEl.classList.add('chat');
+  prompt.title = 'leave chat';
+  setLocked(false);
+
+  chan = sb.channel(await hash('group|' + me), { config: { broadcast: { self: false }, presence: { key: myId } } });
+  chan.on('presence', { event: 'sync' }, async () => {
+    const st = chan.presenceState(), here = {};
+    for (const [k, ms] of Object.entries(st)) {
+      if (k === myId) continue;
+      const m = ms.reduce((a, b) => ((b && b.at) > (a && a.at) ? b : a), ms[0]);
+      if (m && m.group && m.ip === me && typeof m.pk === 'string' && m.pk.length < 200) here[k] = m;
+    }
+    for (const id of Object.keys(here).slice(0, 30)) {
+      if (members[id] && members[id].pk === here[id].pk) {
+        if (members[id].gone) { clearTimeout(members[id].gone); members[id].gone = null; }
+        continue;
+      }
+      try {
+        const k = await keyFor(id, here[id].pk), fresh = !members[id];
+        members[id] = { pk: here[id].pk, key: k.key, tag: await tagOf(here[id].pk), gone: null };
+        if (fresh) line(members[id].tag + ' joined', true);
+      } catch {}
+    }
+    // someone missing: give them a few seconds in case they're just refreshing
+    for (const id of Object.keys(members)) if (!here[id] && !members[id].gone) {
+      members[id].gone = setTimeout(() => {
+        const s2 = chan && chan.presenceState();
+        if (!members[id]) return;
+        if (s2 && s2[id]) { members[id].gone = null; return; }
+        line(members[id].tag + ' left', true); delete members[id];
+      }, 6000);
+    }
+  });
+  chan.on('broadcast', { event: 'g' }, ({ payload: p }) => {
+    if (!p || !members[p.from] || typeof p.iv !== 'string' || typeof p.ct !== 'string' || p.ct.length > 90000) return;
+    const w = p.keys && p.keys[myId];
+    if (!w || typeof w.iv !== 'string' || typeof w.k !== 'string') return;
+    const mem = members[p.from];
+    inQ = inQ.then(async () => {
+      const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(w.iv) }, mem.key, fromB64(w.k));
+      const ck = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+      const d = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(p.iv) }, ck, fromB64(p.ct))));
+      if (!d || d.from !== p.from) return;
+      if (d.e === 'msg' && typeof d.text === 'string') { if (allow(inRate, 8)) chatLine(who(p.from) + ': ' + d.text.slice(0, 2000)); }
+      else if (d.e === 'file') gotChunk(d, who(p.from));
+      else if (d.e === 'ping') sendGroup('pong', { to: d.from, ts: d.ts }, [d.from]);
+      else if (d.e === 'pong' && d.to === myId) showPing(Math.max(0, Date.now() - d.ts));
+    }).catch(() => {});
+  });
+  let warned = false;
+  chan.subscribe(st => {
+    if (st === 'SUBSCRIBED') chan.track({ ip: me, group: true, at: Date.now(), pk: myPk });
+    else if ((st === 'CHANNEL_ERROR' || st === 'TIMED_OUT') && !warned) { warned = true; line("can't reach the chat relay right now, retrying...", 'bad'); }
+  });
+  // ping one other member every 8s (one ping + one pong, so groups stay cheap)
+  groupPingTimer = setInterval(() => { const ids = Object.keys(members); if (ids.length) sendGroup('ping', { ts: Date.now() }, [ids[0]]); else { pingEl.textContent = ''; } }, 8000);
 }
 
 async function start() {
@@ -293,7 +405,7 @@ const inRate = [], outRate = [];
 function allow(arr, perSec) { const now = Date.now(); while (arr.length && now - arr[0] > 1000) arr.shift(); if (arr.length >= perSec) return false; arr.push(now); return true; }
 let sending = false;
 
-function gotChunk(d) {
+function gotChunk(d, label) {
   if (typeof d.id !== 'string' || typeof d.b !== 'string' || !(d.n > 0) || d.n > MAX_PARTS || !(d.i >= 0 && d.i < d.n)) return;
   if (d.b.length > CHUNK * 1.4) return;
   if (!incoming[d.id] && Object.keys(incoming).length >= 2) return; // at most 2 files arriving at once
@@ -303,7 +415,7 @@ function gotChunk(d) {
   if (f.bytes > MAX_FILE) { delete incoming[d.id]; if (f.el) f.el.remove(); return line('blocked a file over 5mb', 'bad'); }
   if (!f.el) { f.el = document.createElement('div'); f.el.className = 'sys'; log.appendChild(f.el); }
   f.el.textContent = 'receiving ' + String(d.name || 'file').slice(0, 100) + '... ' + Math.round(f.got / d.n * 100) + '%';
-  if (f.got === d.n) { delete incoming[d.id]; f.el.remove(); fileLine(target, d.name, d.type, new Blob(f.parts)); }
+  if (f.got === d.n) { delete incoming[d.id]; f.el.remove(); fileLine(label || target, d.name, d.type, new Blob(f.parts)); }
 }
 // drop half-received files that stalled
 setInterval(() => { for (const k in incoming) if (Date.now() - incoming[k].at > 120000) { if (incoming[k].el) incoming[k].el.remove(); delete incoming[k]; } }, 10000);
@@ -388,7 +500,7 @@ form.onsubmit = (e) => {
   sync();
   if (state === 'ip' && me) {
     if (!validIp(v.trim())) return line('not a valid ip address', 'bad');
-    if (v.trim() === me) return line("you can't connect to your own ip", 'bad');
+    if (v.trim() === me) { setLocked(true); return startGroup(); }
     state = 'waiting';
     target = v.trim().slice(0, 64);
     setLocked(true);
